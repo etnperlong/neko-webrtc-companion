@@ -16,13 +16,22 @@ type ICEServer struct {
 // ParseICEServers converts a Cloudflare TURN allocation response into a slice
 // of normalized ICE servers.
 func ParseICEServers(body []byte) ([]ICEServer, error) {
-	var resp cloudflareResponse
+	var resp cloudflareGenerateResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err
 	}
 
-	servers := make([]ICEServer, 0, len(resp.IceServers))
-	for _, entry := range resp.IceServers {
+	entries := resp.Result.IceServers
+	if len(entries) == 0 {
+		entries = resp.IceServers
+	}
+
+	if len(entries) == 0 && len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("cloudflare: %s", resp.Errors[0].Message)
+	}
+
+	servers := make([]ICEServer, 0, len(entries))
+	for _, entry := range entries {
 		if len(entry.URLs) == 0 {
 			continue
 		}
@@ -34,6 +43,17 @@ func ParseICEServers(body []byte) ([]ICEServer, error) {
 	}
 
 	return servers, nil
+}
+
+type cloudflareGenerateResponse struct {
+	Result     cloudflareResponse    `json:"result"`
+	IceServers []cloudflareICEServer `json:"iceServers"`
+	Errors     []cloudflareError     `json:"errors"`
+}
+
+type cloudflareError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }
 
 type cloudflareResponse struct {
