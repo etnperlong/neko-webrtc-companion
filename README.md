@@ -1,21 +1,38 @@
 # Neko TURN Refresh
 
-This repository holds the scaffolding for a Go-based TURN credential refresh service. The current runnable pieces are limited to configuration loading, HTTP health/trigger endpoints, and scheduler plumbing; the actual refresh job is still a TODO (see `internal/app/runScheduledJob`).
+This repository holds a runnable Go-based TURN credential refresh service. The refresh pipeline now wires the Cloudflare fetcher, Neko rewriter, and Docker restarts, so the scheduler and `/trigger` endpoint execute a meaningful refresh cycle that updates credentials and restarts matching containers.
 
 ## Environment variables
 
 All variables are loaded at startup via `config.LoadFromEnv`. The runtime **requires** the values below; missing any of them prevents the binary from starting.
 
-- `NEKO_TURN_CRON` — cron expression that will govern when the (future) refresh job runs. The value must be a valid cron spec (e.g. `0 */6 * * *`).
+- `NEKO_TURN_CRON` — cron expression that governs when the refresh job runs. The value must be a valid cron spec (e.g. `0 */6 * * *`).
 - `CLOUDFLARE_TURN_KEY_ID` — identifier for the Cloudflare TURN key pair that should be rotated.
 - `CLOUDFLARE_API_TOKEN` — scoped API token that can read/write TURN resources in the target Cloudflare account.
 - `NEKO_CONFIG_PATH` — absolute path inside the container to the Neko YAML file that drives the refresh decisions. For example, `NEKO_CONFIG_PATH=/data/neko-config.yaml`. This file must be mounted as a volume (see below).
 - `HTTP_ADDR` — address that the HTTP server listens on. Defaults to `:8080` if unset, so this value is optional unless you need a different port.
 
+A few optional overrides help tune the refresh runtime:
+
+- `CLOUDFLARE_TURN_TTL` (default `86400`) — TTL in seconds for the Cloudflare TURN credential request.
+- `RUN_ON_START` (default `true`) — controls whether the scheduler runs a refresh cycle immediately at startup instead of waiting for the first cron tick.
+- `DOCKER_CONTAINER_NAME_GLOB` (default `neko-rooms-*`) — glob that selects containers whose names should be restarted. The filter is always applied and respects the AND semantics described below.
+- `DOCKER_IMAGE_GLOB` — optional glob that additionally filters containers by their image reference. Matches follow standard glob rules and are only evaluated when this value is set.
+- `DOCKER_LABEL_TRUE_KEY` — optional label key that must equal `true` on the container to be included. When this value is empty the label check is skipped; when set it behaves like any other AND filter.
+- `DOCKER_RESTART_TIMEOUT` — optional duration (e.g. `30s`) that is passed to the Docker restart timeout. When unset or non-positive the default Docker timeout applies.
+
 ## Runtime requirements
 
-- **Mounted Docker socket**: The eventual refresh implementation will call Docker SDK APIs (`internal/docker`), so deployments are expected to mount `/var/run/docker.sock` (read-only is sufficient) to reach the host daemon. The current scheduler/trigger scaffold does not yet exercise Docker calls, but the mount is documented now to stay aligned with the intended production setup.
-- **Mounted Neko config**: Likewise, `NEKO_CONFIG_PATH` should point to a mounted Neko YAML file (e.g. `~/.config/neko-config.yaml`) in preparation for the refresh job wiring. The path does not affect the present stubbed run, but the volume will be necessary once the refresh logic acts on that configuration.
+The refresh cycle now executes Cloudflare fetches, rewrites the configured Neko YAML, and restarts Docker containers that match the configured filters. Deployments therefore still need:
+
+- **Mounted Docker socket**: The refresh service calls Docker SDK APIs (`internal/docker`), so deployments are expected to mount `/var/run/docker.sock` (read-only is sufficient) to reach the host daemon.
+- **Mounted Neko config**: `NEKO_CONFIG_PATH` should point to a mounted Neko YAML file (e.g. `~/.config/neko-config.yaml`). The file is read and potentially rewritten during each refresh cycle, so it must reflect the currently active configuration.
+
+Development has been validated in a Docker-compatible environment; real deployment should still be tested on the target host to ensure the restart behavior meets expectations.
+
+### Docker restart filters
+
+The DOCKER_* environment variables define filters that all participate with AND semantics. Only configured filters are evaluated (empty values are ignored), containers must match every configured glob, and the `DOCKER_LABEL_TRUE_KEY`-named label (when set) must equal `true` to be considered for a restart. This safeguards unrelated workloads from being affected when multiple filters are combined.
 
 ## Health & control endpoints
 
@@ -25,9 +42,11 @@ The HTTP server exports three endpoints on `HTTP_ADDR`:
 | --- | --- | --- |
 | `/healthz` | `GET` | Liveness probe; always responds with `200 OK`. |
 | `/readyz` | `GET` | Readiness probe; returns `503` before the scheduler is marked ready, `200 OK` afterwards. |
-| `/trigger` | `POST` | Triggers `runScheduledJob` on demand. Currently the job body is a stub (`internal/app` keeps a TODO) so this endpoint returns `200 OK` but no Cloudflare/Docker work happens yet. |
+| `/trigger` | `POST` | Triggers `runScheduledJob` on demand. Returns `200 OK` when a refresh completed (`status: ok`) or detected no config changes (`status: noop`), `409 Conflict` when a refresh is already in progress (`status: busy`), and `500 Internal Server Error` when the refresh fails (`status: failed`). |
 
 Use these paths for Kubernetes/Docker health checks while the feature is under development.
+
+Each trigger response is JSON that includes `status`, `message`, `changed`, and `restarted` to help automation understand whether a restart happened or if the request was skipped.
 
 ## Docker build & run
 
@@ -38,7 +57,7 @@ Use these paths for Kubernetes/Docker health checks while the feature is under d
 docker run --rm \
   --env-file .env \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v /path/to/neko-config.yaml:/data/neko-config.yaml:ro \
+  -v /path/to/neko-config.yaml:/data/neko-config.yaml \
   -p 8080:8080 \
   neko-turn-refresh:test
 ```
@@ -57,14 +76,14 @@ services:
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./neko-config.yaml:/data/neko-config.yaml:ro
+      - ./neko-config.yaml:/data/neko-config.yaml
 ```
 
-Set `NEKO_CONFIG_PATH=/data/neko-config.yaml` in `.env` to match the above. The compose setup makes it easy to share the socket and config while keeping secrets out of version control.
+Set `NEKO_CONFIG_PATH=/data/neko-config.yaml` in `.env` to match the above. The config mount must be writable because the refresh cycle rewrites the YAML before restarting matching containers. The compose setup makes it easy to share the socket and config while keeping secrets out of version control.
 
 ## Current status
 
-- `internal/app` wires the HTTP handlers and scheduler but the refresh job body (`runScheduledJob`) is currently a no-op placeholder.
-- `internal/http` exposes the health, readiness, and trigger endpoints described above. The trigger handler calls the placeholder job so it always succeeds even though no Cloudflare or Docker work happens yet.
+- `internal/app` wires the HTTP handlers, scheduler, and `refresh.Service`, so both the cron job and `/trigger` endpoint now execute a runnable refresh cycle.
+- `internal/http` exposes the health, readiness, and trigger endpoints described above. The trigger handler now writes structured JSON outcomes and enforces the busy/no-op/failure response codes described earlier.
 
-Once the refresh service is implemented, the scheduler will run it on the configured cron expression and the trigger endpoint will provide a manual override.
+The refresh pipeline is running in this branch, but be sure to validate it on the target host before relying on automated restarts in production.
