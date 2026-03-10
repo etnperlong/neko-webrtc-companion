@@ -1,0 +1,12 @@
+.git
+.gitignore
+.DS_Store
+*.log
+*.tmp
+*.out
+bin/
+node_modules/
+tmp/
+.vscode/
+.idea/
+*.swp
