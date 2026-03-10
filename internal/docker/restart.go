@@ -19,12 +19,13 @@ type Client interface {
 
 // Restarter handles restarting containers whose names match a glob.
 type Restarter struct {
-	client Client
+	client  Client
+	filters ContainerFilters
 }
 
 // NewRestarter creates a Restarter that uses the provided Docker client.
-func NewRestarter(client Client) *Restarter {
-	return &Restarter{client: client}
+func NewRestarter(client Client, filters ContainerFilters) *Restarter {
+	return &Restarter{client: client, filters: filters}
 }
 
 // NewDockerClient creates a Docker client using environmental configuration.
@@ -48,7 +49,7 @@ func (d *dockerclientWrapper) ContainerRestart(ctx context.Context, containerID 
 	return d.inner.ContainerRestart(ctx, containerID, options)
 }
 
-// RestartMatching restarts every container whose name matches the given pattern.
+// RestartMatching restarts every container whose configured filters match.
 // It returns the normalized container names that were restarted.
 func (r *Restarter) RestartMatching(ctx context.Context, pattern string, timeout *time.Duration) ([]string, error) {
 	containers, err := r.client.ContainerList(ctx, types.ContainerListOptions{})
@@ -58,20 +59,44 @@ func (r *Restarter) RestartMatching(ctx context.Context, pattern string, timeout
 
 	var restarted []string
 	for _, container := range containers {
-		matches, err := MatchContainerNames(container.Names, pattern)
+		filters := r.filters
+		matches, err := MatchContainerNames(container.Names, filters.NamePattern)
 		if err != nil {
-			return nil, fmt.Errorf("match containers %s for pattern %q: %w", container.ID, pattern, err)
+			return nil, fmt.Errorf("match containers %s for pattern %q: %w", container.ID, filters.NamePattern, err)
 		}
 		if len(matches) == 0 {
 			continue
 		}
 
-		stopOptions := containertypes.StopOptions{Timeout: stopTimeout(timeout)}
-		if err := r.client.ContainerRestart(ctx, container.ID, stopOptions); err != nil {
-			return nil, fmt.Errorf("restart container %s for pattern %q: %w", container.ID, pattern, err)
+		if pattern != "" {
+			matches, err = MatchContainerNames(matches, pattern)
+			if err != nil {
+				return nil, fmt.Errorf("match runtime pattern %q for container %s: %w", pattern, container.ID, err)
+			}
 		}
 
-		restarted = append(restarted, matches...)
+		if len(matches) == 0 || !hasLabelTrueValue(container.Labels, filters.LabelTrueKey) {
+			continue
+		}
+
+		imageMatched, err := matchesImage(container.Image, filters.ImagePattern)
+		if err != nil {
+			return nil, fmt.Errorf("match image %q for container %s: %w", container.Image, container.ID, err)
+		}
+		if !imageMatched {
+			continue
+		}
+
+		stopOptions := containertypes.StopOptions{Timeout: stopTimeout(timeout)}
+		effectivePattern := filters.NamePattern
+		if pattern != "" {
+			effectivePattern = pattern
+		}
+		if err := r.client.ContainerRestart(ctx, container.ID, stopOptions); err != nil {
+			return nil, fmt.Errorf("restart container %s for pattern %q: %w", container.ID, effectivePattern, err)
+		}
+
+		restarted = append(restarted, matches[0])
 	}
 
 	return restarted, nil
@@ -81,9 +106,12 @@ func stopTimeout(timeout *time.Duration) *int {
 	if timeout == nil {
 		return nil
 	}
+	if *timeout <= 0 {
+		return nil
+	}
 
 	seconds := int(math.Ceil(timeout.Seconds()))
-	if seconds == 0 && *timeout > 0 {
+	if seconds == 0 {
 		seconds = 1
 	}
 	return &seconds

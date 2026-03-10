@@ -45,13 +45,13 @@ func TestMatchContainerNames_InvalidPattern(t *testing.T) {
 func TestRestarter_RestartsMatchingContainers(t *testing.T) {
 	fake := &fakeClient{
 		containers: []types.Container{
-			{ID: "c1", Names: []string{"/neko-rooms-a"}},
-			{ID: "c2", Names: []string{"/db"}},
-			{ID: "c3", Names: []string{"/neko-rooms-b"}},
+			{ID: "c1", Names: []string{"/neko-rooms-a"}, Image: "neko:latest", Labels: map[string]string{"managed": "true"}},
+			{ID: "c2", Names: []string{"/db"}, Image: "postgres:latest", Labels: map[string]string{"managed": "true"}},
+			{ID: "c3", Names: []string{"/neko-rooms-b"}, Image: "neko:latest", Labels: map[string]string{"managed": "true"}},
 		},
 	}
 
-	restarter := NewRestarter(fake)
+	restarter := NewRestarter(fake, ContainerFilters{})
 	timeout := 5 * time.Second
 
 	restarted, err := restarter.RestartMatching(context.Background(), "neko-rooms-*", &timeout)
@@ -85,10 +85,10 @@ func TestRestarter_RestartsMatchingContainers(t *testing.T) {
 
 func TestRestarter_RestartMatching_NoMatches(t *testing.T) {
 	fake := &fakeClient{
-		containers: []types.Container{{ID: "c1", Names: []string{"/db"}}},
+		containers: []types.Container{{ID: "c1", Names: []string{"/db"}, Image: "postgres:latest", Labels: map[string]string{"managed": "true"}}},
 	}
 
-	restarter := NewRestarter(fake)
+	restarter := NewRestarter(fake, ContainerFilters{})
 
 	restarted, err := restarter.RestartMatching(context.Background(), "neko-rooms-*", nil)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestRestarter_ContainerListError(t *testing.T) {
 	listErr := errors.New("boom")
 	fake := &fakeClient{listErr: listErr}
 
-	restarter := NewRestarter(fake)
+	restarter := NewRestarter(fake, ContainerFilters{})
 	pattern := "neko-rooms-*"
 
 	_, err := restarter.RestartMatching(context.Background(), pattern, nil)
@@ -124,11 +124,11 @@ func TestRestarter_ContainerListError(t *testing.T) {
 func TestRestarter_ContainerRestartError(t *testing.T) {
 	restartErr := errors.New("boom")
 	fake := &fakeClient{
-		containers: []types.Container{{ID: "c1", Names: []string{"/neko-rooms-a"}}},
+		containers: []types.Container{{ID: "c1", Names: []string{"/neko-rooms-a"}, Image: "neko:latest", Labels: map[string]string{"managed": "true"}}},
 		restartErr: restartErr,
 	}
 
-	restarter := NewRestarter(fake)
+	restarter := NewRestarter(fake, ContainerFilters{})
 	pattern := "neko-rooms-*"
 
 	_, err := restarter.RestartMatching(context.Background(), pattern, nil)
@@ -143,10 +143,10 @@ func TestRestarter_ContainerRestartError(t *testing.T) {
 
 func TestRestarter_MatchContainerNamesError(t *testing.T) {
 	fake := &fakeClient{
-		containers: []types.Container{{ID: "c1", Names: []string{"/neko-rooms-a"}}},
+		containers: []types.Container{{ID: "c1", Names: []string{"/neko-rooms-a"}, Image: "neko:latest", Labels: map[string]string{"managed": "true"}}},
 	}
 
-	restarter := NewRestarter(fake)
+	restarter := NewRestarter(fake, ContainerFilters{})
 	pattern := "["
 
 	_, err := restarter.RestartMatching(context.Background(), pattern, nil)
@@ -154,7 +154,7 @@ func TestRestarter_MatchContainerNamesError(t *testing.T) {
 		t.Fatalf("expected error from invalid glob pattern")
 	}
 
-	if !strings.Contains(err.Error(), "match containers c1") || !strings.Contains(err.Error(), pattern) {
+	if !strings.Contains(err.Error(), "match runtime pattern") || !strings.Contains(err.Error(), pattern) {
 		t.Fatalf("unexpected error context: %v", err)
 	}
 }
@@ -167,6 +167,95 @@ func TestStopTimeout_RoundsUp(t *testing.T) {
 	}
 	if *result != 2 {
 		t.Fatalf("expected rounded timeout 2 seconds, got %v", *result)
+	}
+}
+
+func TestStopTimeout_NonPositiveBecomesNil(t *testing.T) {
+	zero := time.Duration(0)
+	if got := stopTimeout(&zero); got != nil {
+		t.Fatalf("expected nil timeout for zero duration, got %v", got)
+	}
+
+	negative := -1 * time.Second
+	if got := stopTimeout(&negative); got != nil {
+		t.Fatalf("expected nil timeout for negative duration, got %v", got)
+	}
+}
+
+func TestRestarter_MatchesNameImageAndLabelWithANDSemantics(t *testing.T) {
+	fake := &fakeClient{
+		containers: []types.Container{
+			{ID: "c1", Names: []string{"/neko-rooms-a"}, Image: "ghcr.io/m1k1o/neko:latest", Labels: map[string]string{"turn.managed": "true"}},
+			{ID: "c2", Names: []string{"/neko-rooms-b"}, Image: "ghcr.io/m1k1o/neko:latest", Labels: map[string]string{"turn.managed": "false"}},
+			{ID: "c3", Names: []string{"/neko-rooms-c"}, Image: "busybox:latest", Labels: map[string]string{"turn.managed": "true"}},
+			{ID: "c4", Names: []string{"/db"}, Image: "ghcr.io/m1k1o/neko:latest", Labels: map[string]string{"turn.managed": "true"}},
+		},
+	}
+
+	restarter := NewRestarter(fake, ContainerFilters{
+		NamePattern:  "neko-rooms-*",
+		ImagePattern: "ghcr.io/m1k1o/neko:*",
+		LabelTrueKey: "turn.managed",
+	})
+
+	restarted, err := restarter.RestartMatching(context.Background(), "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error restarting containers: %v", err)
+	}
+
+	expectedNames := []string{"neko-rooms-a"}
+	if !reflect.DeepEqual(restarted, expectedNames) {
+		t.Fatalf("expected restarted names %v, got %v", expectedNames, restarted)
+	}
+
+	if !reflect.DeepEqual(fake.restartedIDs, []string{"c1"}) {
+		t.Fatalf("expected restarted IDs [c1], got %v", fake.restartedIDs)
+	}
+}
+
+func TestRestarter_RuntimePatternAndConfiguredNamePatternBothApply(t *testing.T) {
+	fake := &fakeClient{
+		containers: []types.Container{
+			{ID: "c1", Names: []string{"/neko-prod-a"}, Image: "ghcr.io/m1k1o/neko:latest", Labels: map[string]string{"turn.managed": "true"}},
+			{ID: "c2", Names: []string{"/neko-dev-a"}, Image: "ghcr.io/m1k1o/neko:latest", Labels: map[string]string{"turn.managed": "true"}},
+		},
+	}
+
+	restarter := NewRestarter(fake, ContainerFilters{NamePattern: "neko-prod-*"})
+
+	restarted, err := restarter.RestartMatching(context.Background(), "neko-*", nil)
+	if err != nil {
+		t.Fatalf("unexpected error restarting containers: %v", err)
+	}
+
+	expected := []string{"neko-prod-a"}
+	if !reflect.DeepEqual(restarted, expected) {
+		t.Fatalf("expected restarted names %v, got %v", expected, restarted)
+	}
+	if !reflect.DeepEqual(fake.restartedIDs, []string{"c1"}) {
+		t.Fatalf("expected restarted IDs [c1], got %v", fake.restartedIDs)
+	}
+}
+
+func TestRestarter_MultiNameContainerReportedOnce(t *testing.T) {
+	fake := &fakeClient{
+		containers: []types.Container{
+			{ID: "c1", Names: []string{"/neko-rooms-a", "/alias-a"}, Image: "ghcr.io/m1k1o/neko:latest", Labels: map[string]string{"turn.managed": "true"}},
+		},
+	}
+
+	restarter := NewRestarter(fake, ContainerFilters{NamePattern: "*a"})
+
+	restarted, err := restarter.RestartMatching(context.Background(), "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error restarting containers: %v", err)
+	}
+
+	if len(restarted) != 1 {
+		t.Fatalf("expected one reported restart, got %v", restarted)
+	}
+	if !reflect.DeepEqual(fake.restartedIDs, []string{"c1"}) {
+		t.Fatalf("expected restarted IDs [c1], got %v", fake.restartedIDs)
 	}
 }
 

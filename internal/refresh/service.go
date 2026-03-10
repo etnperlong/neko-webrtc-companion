@@ -2,6 +2,7 @@ package refresh
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/etnperlong/neko-webrtc-companion/internal/cloudflare"
@@ -37,11 +38,16 @@ type Service struct {
 	restarter      Restarter
 	containerGlob  string
 	restartTimeout *time.Duration
+
+	mu      sync.Mutex
+	running bool
 }
 
 // Result captures the outcome of a refresh job.
 type Result struct {
 	Err          error
+	Busy         bool
+	Skipped      bool
 	Changed      bool
 	NoOp         bool
 	RestartCount int
@@ -63,6 +69,12 @@ func NewService(fetcher TURNClient, rewriter Rewriter, store Store, restarter Re
 // RunOnce executes one refresh job.
 func (s *Service) RunOnce(ctx context.Context) Result {
 	result := Result{}
+	if !s.tryStart() {
+		result.Busy = true
+		result.Skipped = true
+		return result
+	}
+	defer s.finish()
 
 	servers, err := s.fetcher.Fetch(ctx)
 	if err != nil {
@@ -103,6 +115,22 @@ func (s *Service) RunOnce(ctx context.Context) Result {
 	result.RestartCount = len(restarted)
 
 	return result
+}
+
+func (s *Service) tryStart() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running {
+		return false
+	}
+	s.running = true
+	return true
+}
+
+func (s *Service) finish() {
+	s.mu.Lock()
+	s.running = false
+	s.mu.Unlock()
 }
 
 func toNekoICEServers(servers []cloudflare.ICEServer) []neko.ICEServer {

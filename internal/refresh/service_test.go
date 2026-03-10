@@ -3,6 +3,7 @@ package refresh
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -238,6 +239,31 @@ func TestRunOnce_ForwardsRestartArgs(t *testing.T) {
 	}
 }
 
+func TestRunOnce_SkipsWhenAlreadyRunning(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	service := NewService(&blockingFetcher{started: started, release: release}, &fakeRewriter{}, &fakeStore{}, &fakeRestarter{}, "", nil)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = service.RunOnce(context.Background())
+	}()
+
+	<-started
+	result := service.RunOnce(context.Background())
+	if !result.Busy || !result.Skipped {
+		t.Fatalf("expected busy skipped result, got %+v", result)
+	}
+	if result.Err != nil {
+		t.Fatalf("expected no error for busy skip, got %v", result.Err)
+	}
+
+	close(release)
+	wg.Wait()
+}
+
 type callRecorder struct {
 	ops []string
 }
@@ -252,6 +278,24 @@ type fakeFetcher struct {
 	servers  []cloudflare.ICEServer
 	err      error
 	recorder *callRecorder
+}
+
+type blockingFetcher struct {
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (f *blockingFetcher) Fetch(ctx context.Context) ([]cloudflare.ICEServer, error) {
+	select {
+	case f.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-f.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return nil, nil
 }
 
 func (f *fakeFetcher) Fetch(ctx context.Context) ([]cloudflare.ICEServer, error) {
