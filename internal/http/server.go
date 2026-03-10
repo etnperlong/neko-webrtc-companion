@@ -2,13 +2,23 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+
+	"github.com/etnperlong/neko-webrtc-companion/internal/refresh"
 )
 
 // Dependencies encapsulates the collaborators required by the HTTP handlers.
 type Dependencies struct {
 	Ready   func() bool
-	Trigger func(context.Context) error
+	Trigger func(context.Context) refresh.Result
+}
+
+type triggerResponse struct {
+	Status    string   `json:"status"`
+	Changed   bool     `json:"changed"`
+	Restarted []string `json:"restarted"`
+	Message   string   `json:"message"`
 }
 
 // Server exposes the HTTP endpoints for health and trigger control.
@@ -69,9 +79,26 @@ func (s *Server) triggerHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "trigger not configured", http.StatusServiceUnavailable)
 		return
 	}
-	if err := s.deps.Trigger(r.Context()); err != nil {
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
+	result := s.deps.Trigger(r.Context())
+	response := triggerResponse{Changed: result.Changed, Restarted: result.Restarted}
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case result.Busy || result.Skipped:
+		response.Status = "busy"
+		response.Message = "refresh already running"
+		w.WriteHeader(http.StatusConflict)
+	case result.Err != nil:
+		response.Status = "failed"
+		response.Message = result.Err.Error()
+		w.WriteHeader(http.StatusInternalServerError)
+	case result.NoOp:
+		response.Status = "noop"
+		response.Message = "no config changes"
+		w.WriteHeader(http.StatusOK)
+	default:
+		response.Status = "ok"
+		response.Message = "refresh completed"
+		w.WriteHeader(http.StatusOK)
 	}
-	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(response)
 }
