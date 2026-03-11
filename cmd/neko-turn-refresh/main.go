@@ -1,21 +1,42 @@
 package main
 
 import (
-	"log"
+	"io"
+	"log/slog"
 	"os"
 
 	"github.com/etnperlong/neko-webrtc-companion/internal/app"
 	"github.com/etnperlong/neko-webrtc-companion/internal/config"
+	"github.com/etnperlong/neko-webrtc-companion/internal/logging"
 )
 
 func main() {
-	cfg, err := config.LoadFromEnv(os.Getenv)
+	os.Exit(run(os.Getenv, os.Stderr))
+}
+
+func run(getenv func(string) string, stderr io.Writer) int {
+	logCfg, err := logging.LoadConfig(getenv)
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		logging.New(logging.Config{Format: logging.FormatText, Level: slog.LevelInfo, Color: false}, stderr).Error("failed to load logging config", "component", "main", "err", err)
+		return 1
 	}
+
+	logger := logging.New(logCfg, stderr)
+	slog.SetDefault(logger)
+
+	cfg, err := config.LoadFromEnv(getenv)
+	if err != nil {
+		slog.Error("failed to load config", "component", "main", "err", err)
+		return 1
+	}
+
+	slog.Info("starting neko turn refresh", "component", "main", "http_addr", cfg.HTTPAddr, "cron", cfg.Cron, "config_path", cfg.NekoConfigPath, "run_on_start", cfg.RunOnStart)
 
 	runner := app.New(cfg)
 	if err := runner.Run(); err != nil {
-		log.Fatalf("application stopped: %v", err)
+		slog.Error("application stopped", "component", "main", "err", err)
+		return 1
 	}
+
+	return 0
 }
