@@ -81,9 +81,21 @@ services:
 
 Set `NEKO_CONFIG_PATH=/data/neko-config.yaml` in `.env` to match the above. The config mount must be writable because the refresh cycle rewrites the YAML before restarting matching containers. The compose setup makes it easy to share the socket and config while keeping secrets out of version control.
 
+Local testing can still follow the simple `docker build`/`docker run` workflow above, but the multi-arch release flow described below uses `docker buildx` to publish each architecture and a manifest tag.
+
 ## Current status
 
 - `internal/app` wires the HTTP handlers, scheduler, and `refresh.Service`, so both the cron job and `/trigger` endpoint now execute a runnable refresh cycle.
 - `internal/http` exposes the health, readiness, and trigger endpoints described above. The trigger handler now writes structured JSON outcomes and enforces the busy/no-op/failure response codes described earlier.
 
 The refresh pipeline is running in this branch, but be sure to validate it on the target host before relying on automated restarts in production.
+
+## Release
+
+The release pipeline lives in `.github/workflows/release-image.yml`. It runs when you push a Git tag, or when you start it manually through `workflow_dispatch`. Manual runs may supply a `tag` input; if they do not, the workflow falls back to `run-<run-number>`. Releases publish to GitHub Container Registry (`ghcr.io/<owner>/<repo>`).
+
+A `prepare-tags` job on a native `ubuntu-24.04` runner lowercases the repository path and validates that the release tag is already Docker-safe. Supported release tags must use lowercase letters, digits, `.`, `_`, or `-`. It then emits per-architecture tags (`-amd64` and `-arm64`) plus the final manifest tag.
+
+The `build-amd64` job also runs on `ubuntu-24.04` and builds the `linux/amd64` image with `docker buildx`, pushing it with the `-amd64` suffix. The `build-arm64` job runs on the native `ubuntu-24.04-arm` runner and pushes the `linux/arm64` image with the `-arm64` suffix. After both succeed, the `publish-manifest` job (back on `ubuntu-24.04`) runs `docker buildx imagetools create` to publish the final multi-arch manifest tag that points at the two digests.
+
+Per-arch tags use the suffixes so they can be inspected individually, and the manifest tag is the same validated value without the suffix. The workflow also runs `docker buildx imagetools inspect` after publishing, and you can repeat `docker buildx imagetools inspect ghcr.io/<owner>/<repo>:<tag>` manually if you want to verify the final manifest tag resolves to both architecture digests.
