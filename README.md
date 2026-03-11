@@ -2,9 +2,41 @@
 
 This repository holds a runnable Go-based TURN credential refresh service. The refresh pipeline now wires the Cloudflare fetcher, Neko rewriter, and Docker restarts, so the scheduler and `/trigger` endpoint execute a meaningful refresh cycle that updates credentials and restarts matching containers.
 
-## Environment variables
+## Configuration
 
-All variables are loaded at startup via `config.LoadFromEnv`. The runtime **requires** the values below; missing any of them prevents the binary from starting.
+Runtime configuration now loads in this order:
+
+1. built-in defaults
+2. optional YAML config file from `CONFIG_FILE`
+3. environment variable overrides
+
+That lets local and container deployments mount a config file while still overriding secrets or per-environment values through env vars.
+
+### YAML config file
+
+Set `CONFIG_FILE` to a YAML file path if you want file-based configuration.
+
+```yaml
+cron: "0 */6 * * *"
+cloudflare_turn_key_id: "key-id"
+cloudflare_api_token: "token"
+neko_config_path: "/data/neko-config.yaml"
+http_addr: ":8080"
+cloudflare_turn_ttl: 86400
+run_on_start: true
+docker_container_name_glob: "neko-rooms-*"
+docker_image_glob: "ghcr.io/example/*"
+docker_label_true_key: "managed"
+docker_restart_timeout: "30s"
+```
+
+If `CONFIG_FILE` is unset, the service behaves like the previous env-only mode.
+
+### Environment variables
+
+All variables are loaded at startup via `config.LoadFromEnv`. The runtime **requires** the values below after the full merge; missing any of them prevents the binary from starting.
+
+- `CONFIG_FILE` — optional path to a YAML config file. Relative paths resolve from the current working directory; absolute paths are recommended in production.
 
 - `NEKO_TURN_CRON` — cron expression that governs when the refresh job runs. The value must be a valid cron spec (e.g. `0 */6 * * *`).
 - `CLOUDFLARE_TURN_KEY_ID` — identifier for the Cloudflare TURN key pair that should be rotated.
@@ -25,6 +57,8 @@ A few optional overrides help tune the refresh runtime:
 - `LOG_COLOR` (default `true`) — enables colored text logs when `LOG_FORMAT=text`; JSON logs are never colorized.
 
 The service uses Go's `log/slog` package for structured logs. Text mode is optimized for local `docker logs` readability, while JSON mode is intended for log aggregation pipelines.
+
+For Kubernetes, a good pattern is to mount non-secret YAML config through a `ConfigMap`, then override secrets like `CLOUDFLARE_API_TOKEN` through `Secret`-backed environment variables.
 
 ## Runtime requirements
 
@@ -61,7 +95,9 @@ Each trigger response is JSON that includes `status`, `message`, `changed`, and 
 ```bash
 docker run --rm \
   --env-file .env \
+  -e CONFIG_FILE=/config/config.yaml \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v /path/to/config.yaml:/config/config.yaml:ro \
   -v /path/to/neko-config.yaml:/data/neko-config.yaml \
   -p 8080:8080 \
   neko-turn-refresh:test
@@ -77,14 +113,17 @@ services:
   neko-turn-refresh:
     image: neko-turn-refresh:test
     env_file: .env
+    environment:
+      CONFIG_FILE: /config/config.yaml
     ports:
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config.yaml:/config/config.yaml:ro
       - ./neko-config.yaml:/data/neko-config.yaml
 ```
 
-Set `NEKO_CONFIG_PATH=/data/neko-config.yaml` in `.env` to match the above. The config mount must be writable because the refresh cycle rewrites the YAML before restarting matching containers. The compose setup makes it easy to share the socket and config while keeping secrets out of version control.
+Set `NEKO_CONFIG_PATH=/data/neko-config.yaml` in the YAML config or `.env` to match the above. The Neko config mount must be writable because the refresh cycle rewrites the YAML before restarting matching containers. The app config mount can stay read-only because the service only reads it. The compose setup makes it easy to share the socket and config while keeping secrets out of version control.
 
 Local testing can still follow the simple `docker build`/`docker run` workflow above, but the multi-arch release flow described below uses `docker buildx` to publish each architecture and a manifest tag.
 
