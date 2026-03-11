@@ -20,6 +20,11 @@ A few optional overrides help tune the refresh runtime:
 - `DOCKER_IMAGE_GLOB` — optional glob that additionally filters containers by their image reference. Matches follow standard glob rules and are only evaluated when this value is set.
 - `DOCKER_LABEL_TRUE_KEY` — optional label key that must equal `true` on the container to be included. When this value is empty the label check is skipped; when set it behaves like any other AND filter.
 - `DOCKER_RESTART_TIMEOUT` — optional duration (e.g. `30s`) that is passed to the Docker restart timeout. When unset or non-positive the default Docker timeout applies.
+- `LOG_FORMAT` (default `text`) — selects `text` or `json` structured logs.
+- `LOG_LEVEL` (default `info`) — sets the minimum log level: `debug`, `info`, `warn`, or `error`.
+- `LOG_COLOR` (default `true`) — enables colored text logs when `LOG_FORMAT=text`; JSON logs are never colorized.
+
+The service uses Go's `log/slog` package for structured logs. Text mode is optimized for local `docker logs` readability, while JSON mode is intended for log aggregation pipelines.
 
 ## Runtime requirements
 

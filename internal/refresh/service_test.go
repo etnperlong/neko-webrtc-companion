@@ -1,8 +1,11 @@
 package refresh
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -262,6 +265,23 @@ func TestRunOnce_SkipsWhenAlreadyRunning(t *testing.T) {
 
 	close(release)
 	wg.Wait()
+}
+
+func TestRunOnce_LogsWriteFailureStage(t *testing.T) {
+	var buf bytes.Buffer
+	original := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(original)
+
+	writeErr := errors.New("write failure")
+	service := NewService(&fakeFetcher{}, &fakeRewriter{result: []byte("updated"), changed: true}, &fakeStore{writeErr: writeErr}, &fakeRestarter{}, "", nil)
+
+	_ = service.RunOnce(context.Background())
+
+	output := buf.String()
+	if !strings.Contains(output, "component=refresh") || !strings.Contains(output, "stage=write") {
+		t.Fatalf("expected refresh write stage log, got %q", output)
+	}
 }
 
 type callRecorder struct {

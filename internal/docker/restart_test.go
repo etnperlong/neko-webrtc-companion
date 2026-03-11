@@ -1,8 +1,10 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -256,6 +258,26 @@ func TestRestarter_MultiNameContainerReportedOnce(t *testing.T) {
 	}
 	if !reflect.DeepEqual(fake.restartedIDs, []string{"c1"}) {
 		t.Fatalf("expected restarted IDs [c1], got %v", fake.restartedIDs)
+	}
+}
+
+func TestRestartMatching_LogsMatchSummary(t *testing.T) {
+	var buf bytes.Buffer
+	original := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(original)
+
+	fake := &fakeClient{containers: []types.Container{{ID: "c1", Names: []string{"/neko-rooms-a"}, Image: "neko:latest", Labels: map[string]string{"managed": "true"}}}}
+	restarter := NewRestarter(fake, ContainerFilters{})
+
+	_, err := restarter.RestartMatching(context.Background(), "neko-rooms-*", nil)
+	if err != nil {
+		t.Fatalf("unexpected restart error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "component=docker") || !strings.Contains(output, "restart_count=1") {
+		t.Fatalf("expected docker restart summary log, got %q", output)
 	}
 }
 

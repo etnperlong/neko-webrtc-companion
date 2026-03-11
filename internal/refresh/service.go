@@ -2,6 +2,7 @@ package refresh
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -70,26 +71,31 @@ func NewService(fetcher TURNClient, rewriter Rewriter, store Store, restarter Re
 func (s *Service) RunOnce(ctx context.Context) Result {
 	result := Result{}
 	if !s.tryStart() {
+		slog.Warn("refresh skipped", "component", "refresh", "reason", "already_running")
 		result.Busy = true
 		result.Skipped = true
 		return result
 	}
 	defer s.finish()
+	slog.Debug("refresh run started", "component", "refresh", "container_glob", s.containerGlob)
 
 	servers, err := s.fetcher.Fetch(ctx)
 	if err != nil {
+		slog.Error("refresh fetch failed", "component", "refresh", "stage", "fetch", "err", err)
 		result.Err = err
 		return result
 	}
 
 	current, err := s.store.Read(ctx)
 	if err != nil {
+		slog.Error("refresh read failed", "component", "refresh", "stage", "read", "err", err)
 		result.Err = err
 		return result
 	}
 
 	rewritten, changed, err := s.rewriter.Rewrite(ctx, current, toNekoICEServers(servers))
 	if err != nil {
+		slog.Error("refresh rewrite failed", "component", "refresh", "stage", "rewrite", "err", err)
 		result.Err = err
 		return result
 	}
@@ -97,22 +103,26 @@ func (s *Service) RunOnce(ctx context.Context) Result {
 	result.Changed = changed
 	result.NoOp = !changed
 	if !changed {
+		slog.Info("refresh completed", "component", "refresh", "changed", false, "restart_count", 0)
 		return result
 	}
 
 	if err := s.store.Write(ctx, rewritten); err != nil {
+		slog.Error("refresh write failed", "component", "refresh", "stage", "write", "err", err)
 		result.Err = err
 		return result
 	}
 
 	restarted, err := s.restarter.RestartMatching(ctx, s.containerGlob, s.restartTimeout)
 	if err != nil {
+		slog.Error("refresh restart failed", "component", "refresh", "stage", "restart", "err", err)
 		result.Err = err
 		return result
 	}
 
 	result.Restarted = restarted
 	result.RestartCount = len(restarted)
+	slog.Info("refresh completed", "component", "refresh", "changed", true, "restart_count", result.RestartCount)
 
 	return result
 }

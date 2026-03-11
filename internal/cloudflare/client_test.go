@@ -1,11 +1,14 @@
 package cloudflare
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -323,3 +326,32 @@ func TestFetch_TrimsKeyAndToken(t *testing.T) {
 		t.Fatalf("fetch failed: %v", err)
 	}
 }
+
+func TestFetch_LogsUnexpectedStatus(t *testing.T) {
+	var buf bytes.Buffer
+	original := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(original)
+
+	fetcher, err := NewFetcher(FetcherConfig{
+		HTTPClient: &testHTTPClient{resp: &http.Response{StatusCode: http.StatusInternalServerError, Body: ioNopCloser{strings.NewReader(`{"message":"boom"}`)}}},
+		BaseURL:    "https://rtc.live.cloudflare.com",
+		KeyID:      "test-key",
+		APIToken:   "token",
+		TTL:        60,
+	})
+	if err != nil {
+		t.Fatalf("new fetcher: %v", err)
+	}
+
+	_, _ = fetcher.Fetch(context.Background())
+
+	output := buf.String()
+	if !strings.Contains(output, "component=cloudflare") || !strings.Contains(output, "status=500") {
+		t.Fatalf("expected cloudflare status log, got %q", output)
+	}
+}
+
+type ioNopCloser struct{ *strings.Reader }
+
+func (c ioNopCloser) Close() error { return nil }

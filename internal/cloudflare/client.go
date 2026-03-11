@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -93,6 +94,7 @@ func buildEndpoint(base, keyID string) string {
 
 // Fetch requests TURN credentials from Cloudflare.
 func (f *Fetcher) Fetch(ctx context.Context) ([]ICEServer, error) {
+	slog.Debug("cloudflare fetch starting", "component", "cloudflare", "ttl", f.ttl, "endpoint", f.endpoint)
 	payload := struct {
 		TTL int `json:"ttl"`
 	}{TTL: f.ttl}
@@ -116,11 +118,14 @@ func (f *Fetcher) Fetch(ctx context.Context) ([]ICEServer, error) {
 		return nil, fmt.Errorf("cloudflare: read response: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		slog.Error("cloudflare fetch failed", "component", "cloudflare", "status", resp.StatusCode)
 		return nil, fmt.Errorf("cloudflare: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	servers, err := ParseICEServers(respBody)
 	if err != nil {
+		slog.Error("cloudflare parse failed", "component", "cloudflare", "err", err)
 		return nil, fmt.Errorf("cloudflare: parse response: %w", err)
 	}
+	slog.Info("cloudflare fetch completed", "component", "cloudflare", "server_count", len(servers), "status", resp.StatusCode)
 	return servers, nil
 }
