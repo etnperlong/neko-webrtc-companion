@@ -178,6 +178,40 @@ func TestFetch_BuildsCloudflareRequestWithTTL(t *testing.T) {
 	}
 }
 
+func TestFetch_AcceptsCreatedResponse(t *testing.T) {
+	keyID := "test-key"
+	token := "token"
+	ttl := 300
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"iceServers":[{"urls":["turn:turn.example.com"],"username":"u","credential":"p"}]}`))
+	}))
+	defer srv.Close()
+
+	fetcher, err := NewFetcher(FetcherConfig{
+		HTTPClient: srv.Client(),
+		BaseURL:    srv.URL,
+		KeyID:      keyID,
+		APIToken:   token,
+		TTL:        ttl,
+	})
+	if err != nil {
+		t.Fatalf("new fetcher: %v", err)
+	}
+
+	servers, err := fetcher.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected fetch error: %v", err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(servers))
+	}
+	if got := servers[0].URLs[0]; got != "turn:turn.example.com" {
+		t.Fatalf("unexpected url: %s", got)
+	}
+}
+
 func TestFetch_ReturnsErrorOnNonOKResponse(t *testing.T) {
 	keyID := "test-key"
 	token := "token"

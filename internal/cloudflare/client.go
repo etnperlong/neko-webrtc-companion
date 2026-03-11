@@ -115,7 +115,7 @@ func (f *Fetcher) Fetch(ctx context.Context) ([]ICEServer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare: read response: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("cloudflare: unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 	servers, err := ParseICEServers(respBody)
