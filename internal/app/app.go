@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	nethttp "net/http"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -32,6 +34,8 @@ func New(cfg config.Config) *App {
 
 // Run starts the service lifecycle and blocks until shutdown.
 func (a *App) Run() error {
+	slog.Info("app run starting", "component", "app", "http_addr", a.cfg.HTTPAddr)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -48,9 +52,11 @@ func (a *App) Run() error {
 		Handler: handler,
 	}
 
+	slog.Info("http server listening", "component", "app", "addr", a.cfg.HTTPAddr)
 	serverErr := make(chan error, 1)
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, nethttp.ErrServerClosed) {
+			slog.Error("http server failed", "component", "app", "addr", a.cfg.HTTPAddr, "err", err)
 			serverErr <- err
 		}
 	}()
@@ -68,6 +74,7 @@ func (a *App) Run() error {
 	if a.cfg.RunOnStart {
 		opts = append(opts, scheduler.WithRunOnStart())
 	}
+	slog.Debug("starting scheduler", "component", "app", "cron", a.cfg.Cron, "run_on_start", a.cfg.RunOnStart)
 	sched, err := scheduler.New(a.cfg.Cron, a.runScheduledJob, opts...)
 	if err != nil {
 		_ = httpServer.Shutdown(context.Background())
@@ -78,6 +85,7 @@ func (a *App) Run() error {
 		_ = httpServer.Shutdown(context.Background())
 		return fmt.Errorf("start scheduler: %w", err)
 	}
+	slog.Info("scheduler started", "component", "app", "cron", a.cfg.Cron)
 
 	a.ready.Store(true)
 	defer a.ready.Store(false)
@@ -85,6 +93,7 @@ func (a *App) Run() error {
 	var runErr error
 	select {
 	case <-ctx.Done():
+		slog.Info("shutdown signal received", "component", "app")
 	case err := <-serverErr:
 		if err != nil {
 			runErr = fmt.Errorf("serve http: %w", err)
@@ -98,6 +107,7 @@ func (a *App) Run() error {
 			runErr = fmt.Errorf("%v; shutdown http server: %w", runErr, err)
 		}
 	}
+	slog.Debug("http server shutdown complete", "component", "app")
 
 	if err := sched.Stop(); err != nil {
 		if runErr == nil {
@@ -107,21 +117,27 @@ func (a *App) Run() error {
 		}
 	}
 
+	slog.Info("app run stopped", "component", "app", "err_present", runErr != nil)
 	return runErr
 }
 
 func (a *App) runScheduledJob(ctx context.Context) {
 	if a.svc == nil {
+		slog.Warn("scheduled refresh skipped", "component", "app", "source", "scheduled", "reason", "service_not_configured")
 		return
 	}
-	_ = a.svc.RunOnce(ctx)
+	slog.Debug("refresh starting", "component", "app", "source", "scheduled")
+	logRefreshResult("scheduled", a.svc.RunOnce(ctx))
 }
 
 func (a *App) trigger(ctx context.Context) refresh.Result {
 	if a.svc == nil {
 		return refresh.Result{Err: errors.New("refresh service not configured")}
 	}
-	return a.svc.RunOnce(ctx)
+	slog.Debug("refresh starting", "component", "app", "source", "trigger")
+	result := a.svc.RunOnce(ctx)
+	logRefreshResult("trigger", result)
+	return result
 }
 
 func (a *App) initRuntime() error {
@@ -156,4 +172,22 @@ func (a *App) initRuntime() error {
 
 	a.svc = refresh.NewService(fetcher, rewriter, store, restarter, a.cfg.DockerContainerNameGlob, restartTimeout)
 	return nil
+}
+
+func logRefreshResult(source string, result refresh.Result) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "refresh"
+	}
+
+	switch {
+	case result.Busy || result.Skipped:
+		slog.Warn("refresh skipped", "component", "app", "source", source, "reason", "already_running")
+	case result.Err != nil:
+		slog.Error("refresh failed", "component", "app", "source", source, "err", result.Err)
+	case result.NoOp:
+		slog.Info("refresh completed", "component", "app", "source", source, "changed", false, "restart_count", 0)
+	default:
+		slog.Info("refresh completed", "component", "app", "source", source, "changed", result.Changed, "restart_count", result.RestartCount, "containers", strings.Join(result.Restarted, ","))
+	}
 }
