@@ -9,6 +9,12 @@ import (
 // directory before renaming it over path to ensure atomicity. The final file
 // always has the requested permissions.
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	if _, err := os.Stat(path); err == nil {
+		return writeFileInPlace(path, data, perm)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmpfile-*")
 	if err != nil {
@@ -44,4 +50,25 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	renamed = true
 	return nil
+}
+
+func writeFileInPlace(path string, data []byte, perm os.FileMode) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Chmod(perm); err != nil {
+		file.Close()
+		return err
+	}
+	return file.Close()
 }
