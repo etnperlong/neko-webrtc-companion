@@ -1,0 +1,17 @@
+# Example YAML configuration for neko-turn-refresh.
+#
+# Load this file by setting CONFIG_FILE to its mounted path.
+# Environment variables with the existing names still override these values.
+
+cron: "0 */6 * * *"
+cloudflare_turn_key_id: "example-cloudflare-key-id"
+cloudflare_api_token: "example-cloudflare-api-token"
+neko_config_path: "/data/neko-config.yaml"
+
+http_addr: ":8080"
+cloudflare_turn_ttl: 86400
+run_on_start: true
+docker_container_name_glob: "neko-rooms-*"
+docker_image_glob: "ghcr.io/example/neko-*"
+docker_label_true_key: "turn.managed"
+docker_restart_timeout: "30s"
